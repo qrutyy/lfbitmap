@@ -1,0 +1,10 @@
+*.o
+*.ko
+*.mod*
+.*.cmd
+build/
+.cache/
+compile_commands.json
+.DS_Store
+Module.symvers
+modules.order
