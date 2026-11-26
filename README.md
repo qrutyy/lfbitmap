@@ -7,25 +7,32 @@ Level 0 holds the bits. A bit of level `k + 1` says that the word with the same
 number on level `k` is full, up to one word on top. Allocation walks the hints
 down from the top, one `ffz()` per level, so the cost is `O(levels)` (6 levels
 for 2^36 bits) instead of a scan over the full words in front of the first free
-one. Taking a bit is a `try_cmpxchg()` on one word, freeing is a `clear_bit()`.
+one. Taking a bit is a `try_cmpxchg()` on one word, freeing is a `test_and_clear_bit()`.
 
 ```c
 struct lfbm bm;
 
 lfbm_init(&bm, nbits);        /* may sleep, allocates once */
-bit = lfbm_alloc(&bm);        /* lowest free bit, or -ENOSPC; no locks, no allocation */
-lfbm_claim(&bm, 7);           /* take a given bit, false if taken already */
-lfbm_free(&bm, bit);
+bit = lfbm_find_and_set_bit(&bm);   /* lowest free bit, or -ENOSPC; no locks, no allocation */
+lfbm_test_and_set_bit(&bm, 7);      /* like the kernel: old value, true if it was taken already */
+lfbm_test_and_clear_bit(&bm, bit);  /* old value, true if it was taken and is free now */
+lfbm_test_bit(&bm, bit);
 lfbm_destroy(&bm);
 ```
 
 ## Semantics
 
-- `lfbm_alloc()` returns the lowest free bit **as seen at the time**: with
+- `lfbm_find_and_set_bit()` returns the lowest free bit **as seen at the time**: with
   concurrent frees it may return a higher one, never one that is taken.
 - A bit is never handed out twice.
-- `-ENOSPC` may be reported while a `lfbm_free()` racing with the call is still
-  in flight, never after it has returned.
+- `lfbm_test_and_set_bit()` and `lfbm_test_and_clear_bit()` follow the kernel:
+  they return the old value. A bit past the end warns; set reports it as taken,
+  clear returns false. Clearing a free bit is not warned about.
+- `-ENOSPC` (the kernel's `find_and_set_bit()` returns `nbits` instead) may be
+  false while a parallel `lfbm_test_and_clear_bit()`, or a parallel search that
+  has just filled a word, is still setting or clearing the hints: a late hint
+  may be set before the word is re-read, and a search on a nearly full map then
+  sees the top word full. On a map nobody else touches the result is exact.
 - Hints are only hints. A hint that is wrong in either direction is fixed by
   the next allocation that walks into it, and when nothing is held any more
   they are exact (the tests check that).

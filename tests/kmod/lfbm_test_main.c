@@ -38,24 +38,31 @@ static void lfbm_t_order(unsigned long nbits)
 	LFBM_T_CHECK(!lfbm_init(&bm, nbits));
 
 	for (i = 0; i < nbits; i++)
-		LFBM_T_CHECK(lfbm_alloc(&bm) == (long)i);
-	LFBM_T_CHECK(lfbm_alloc(&bm) == -ENOSPC);
+		LFBM_T_CHECK(lfbm_find_and_set_bit(&bm) == (long)i);
+	LFBM_T_CHECK(lfbm_find_and_set_bit(&bm) == -ENOSPC);
 	LFBM_T_CHECK(lfbm_weight(&bm) == nbits);
 
 	if (nbits < 3) {
 		/* Too small for three distinct holes. */
-		lfbm_free(&bm, nbits - 1);
-		LFBM_T_CHECK(lfbm_alloc(&bm) == (long)(nbits - 1));
+		lfbm_test_and_clear_bit(&bm, nbits - 1);
+		LFBM_T_CHECK(lfbm_find_and_set_bit(&bm) == (long)(nbits - 1));
 	} else {
 		/* Holes come back lowest first. */
-		lfbm_free(&bm, nbits - 1);
-		lfbm_free(&bm, nbits / 2);
-		lfbm_free(&bm, 0);
-		LFBM_T_CHECK(lfbm_alloc(&bm) == 0);
-		LFBM_T_CHECK(lfbm_alloc(&bm) == (long)(nbits / 2));
-		LFBM_T_CHECK(lfbm_alloc(&bm) == (long)(nbits - 1));
+		lfbm_test_and_clear_bit(&bm, nbits - 1);
+		lfbm_test_and_clear_bit(&bm, nbits / 2);
+		lfbm_test_and_clear_bit(&bm, 0);
+		LFBM_T_CHECK(lfbm_find_and_set_bit(&bm) == 0);
+		LFBM_T_CHECK(lfbm_find_and_set_bit(&bm) == (long)(nbits / 2));
+		LFBM_T_CHECK(lfbm_find_and_set_bit(&bm) == (long)(nbits - 1));
 	}
-	LFBM_T_CHECK(lfbm_alloc(&bm) == -ENOSPC);
+	LFBM_T_CHECK(lfbm_find_and_set_bit(&bm) == -ENOSPC);
+
+	/* The kernel semantics: the old value comes back. */
+	LFBM_T_CHECK(lfbm_test_and_clear_bit(&bm, 0));
+	LFBM_T_CHECK(!lfbm_test_and_clear_bit(&bm, 0));
+	LFBM_T_CHECK(!lfbm_test_and_set_bit(&bm, 0));
+	LFBM_T_CHECK(lfbm_test_and_set_bit(&bm, 0));
+	LFBM_T_CHECK(lfbm_test_bit(&bm, 0));
 
 	lfbm_destroy(&bm);
 }
@@ -88,7 +95,7 @@ static int lfbm_t_thread(void *arg)
 		take = n < st->hold && (n == 0 || (seed & 1));
 
 		if (take) {
-			long bit = lfbm_alloc(st->bm);
+			long bit = lfbm_find_and_set_bit(st->bm);
 
 			if (bit == -ENOSPC) {
 				atomic_long_inc(st->nospc);
@@ -110,7 +117,7 @@ static int lfbm_t_thread(void *arg)
 				atomic_set(&lfbm_t_failed, 1);
 				break;
 			}
-			lfbm_free(st->bm, bit);
+			lfbm_test_and_clear_bit(st->bm, bit);
 		}
 
 		if (!(it & 0xfff))
@@ -121,7 +128,7 @@ static int lfbm_t_thread(void *arg)
 		unsigned long bit = held[--n];
 
 		atomic_set(&st->owner[bit], 0);
-		lfbm_free(st->bm, bit);
+		lfbm_test_and_clear_bit(st->bm, bit);
 	}
 
 	if (atomic_dec_and_test(st->running))
@@ -165,7 +172,7 @@ static unsigned long lfbm_t_stress_run(unsigned long nbits, unsigned int hold, u
 		atomic_set(&lfbm_t_failed, 1);
 	}
 	for (i = 0; i < nbits && !atomic_read(&lfbm_t_failed); i++) {
-		if (lfbm_alloc(&bm) != (long)i) {
+		if (lfbm_find_and_set_bit(&bm) != (long)i) {
 			pr_err("lfbm_test: after the run the bit %lu did not come out in order\n", i);
 			atomic_set(&lfbm_t_failed, 1);
 		}

@@ -40,8 +40,8 @@ static void test_order(unsigned long nbits)
 	CHECK(!lfbm_init(&bm, nbits));
 
 	for (i = 0; i < nbits; i++)
-		CHECK(lfbm_alloc(&bm) == (long)i);
-	CHECK(lfbm_alloc(&bm) == -ENOSPC);
+		CHECK(lfbm_find_and_set_bit(&bm) == (long)i);
+	CHECK(lfbm_find_and_set_bit(&bm) == -ENOSPC);
 	CHECK(lfbm_weight(&bm) == nbits);
 
 	for (i = 0; i < ARRAY_SIZE(holes); i++) {
@@ -61,44 +61,49 @@ static void test_order(unsigned long nbits)
 	}
 
 	for (i = 0; i < n; i++)
-		lfbm_free(&bm, sorted[i]);
+		lfbm_test_and_clear_bit(&bm, sorted[i]);
 	CHECK(lfbm_weight(&bm) == nbits - n);
 
 	for (i = 0; i < n; i++)
-		CHECK(lfbm_alloc(&bm) == (long)sorted[i]);
-	CHECK(lfbm_alloc(&bm) == -ENOSPC);
+		CHECK(lfbm_find_and_set_bit(&bm) == (long)sorted[i]);
+	CHECK(lfbm_find_and_set_bit(&bm) == -ENOSPC);
 
 	for (i = nbits; i > 0; i--)
-		lfbm_free(&bm, i - 1);
+		lfbm_test_and_clear_bit(&bm, i - 1);
 	CHECK(lfbm_weight(&bm) == 0);
-	CHECK(lfbm_alloc(&bm) == 0);
+	CHECK(lfbm_find_and_set_bit(&bm) == 0);
 
 	lfbm_destroy(&bm);
 }
 
-static void test_claim(void)
+static void test_test_and_set(void)
 {
 	struct lfbm bm;
 
 	CHECK(!lfbm_init(&bm, 200));
 
-	CHECK(lfbm_claim(&bm, 7));
-	CHECK(!lfbm_claim(&bm, 7));
-	CHECK(lfbm_test(&bm, 7));
-	CHECK(!lfbm_test(&bm, 8));
-	CHECK(!lfbm_test(&bm, 200));
+	CHECK(!lfbm_test_and_set_bit(&bm, 7));
+	CHECK(lfbm_test_and_set_bit(&bm, 7));
+	CHECK(lfbm_test_bit(&bm, 7));
+	CHECK(!lfbm_test_bit(&bm, 8));
+	CHECK(!lfbm_test_bit(&bm, 200));
 
-	/* The claimed bit is skipped. */
-	CHECK(lfbm_alloc(&bm) == 0);
-	CHECK(lfbm_alloc(&bm) == 1);
+	/* The taken bit is skipped. */
+	CHECK(lfbm_find_and_set_bit(&bm) == 0);
+	CHECK(lfbm_find_and_set_bit(&bm) == 1);
 
 	/* Claiming the whole first word makes the next one come out. */
 	for (unsigned long i = 2; i < 64; i++)
-		CHECK(i == 7 || lfbm_claim(&bm, i));
-	CHECK(lfbm_alloc(&bm) == 64);
+		CHECK(i == 7 || !lfbm_test_and_set_bit(&bm, i));
+	CHECK(lfbm_find_and_set_bit(&bm) == 64);
 
-	lfbm_free(&bm, 7);
-	CHECK(lfbm_alloc(&bm) == 7);
+	CHECK(lfbm_test_and_clear_bit(&bm, 7));
+	CHECK(!lfbm_test_and_clear_bit(&bm, 7));
+	CHECK(lfbm_find_and_set_bit(&bm) == 7);
+
+	/* Past the end: reads as taken, nothing to free. */
+	CHECK(lfbm_test_and_set_bit(&bm, 200));
+	CHECK(!lfbm_test_and_clear_bit(&bm, 200));
 
 	lfbm_destroy(&bm);
 }
@@ -112,10 +117,10 @@ static void test_init(void)
 
 	CHECK(!lfbm_init(&bm, 1));
 	CHECK(bm.levels == 1);
-	CHECK(lfbm_alloc(&bm) == 0);
-	CHECK(lfbm_alloc(&bm) == -ENOSPC);
-	lfbm_free(&bm, 0);
-	CHECK(lfbm_alloc(&bm) == 0);
+	CHECK(lfbm_find_and_set_bit(&bm) == 0);
+	CHECK(lfbm_find_and_set_bit(&bm) == -ENOSPC);
+	lfbm_test_and_clear_bit(&bm, 0);
+	CHECK(lfbm_find_and_set_bit(&bm) == 0);
 	lfbm_destroy(&bm);
 
 	CHECK(!lfbm_init(&bm, 64));
@@ -165,7 +170,7 @@ static void *stress_run(void *arg)
 		bool take = n < st->hold && (n == 0 || (xorshift(&seed) & 1));
 
 		if (take) {
-			long bit = lfbm_alloc(st->bm);
+			long bit = lfbm_find_and_set_bit(st->bm);
 
 			if (bit == -ENOSPC) {
 				st->nospc++;
@@ -182,7 +187,7 @@ static void *stress_run(void *arg)
 
 			held[k] = held[--n];
 			CHECK(atomic_exchange(&st->owner[bit], 0) == st->id + 1);
-			lfbm_free(st->bm, bit);
+			lfbm_test_and_clear_bit(st->bm, bit);
 		}
 	}
 
@@ -190,7 +195,7 @@ static void *stress_run(void *arg)
 		unsigned long bit = held[--n];
 
 		CHECK(atomic_exchange(&st->owner[bit], 0) == st->id + 1);
-		lfbm_free(st->bm, bit);
+		lfbm_test_and_clear_bit(st->bm, bit);
 	}
 
 	return NULL;
@@ -223,8 +228,8 @@ static unsigned long test_stress(unsigned long nbits, unsigned int threads, unsi
 	/* Nothing is held: the hints have to be exact, or this does not come out. */
 	CHECK(lfbm_weight(&bm) == 0);
 	for (i = 0; i < nbits; i++)
-		CHECK(lfbm_alloc(&bm) == (long)i);
-	CHECK(lfbm_alloc(&bm) == -ENOSPC);
+		CHECK(lfbm_find_and_set_bit(&bm) == (long)i);
+	CHECK(lfbm_find_and_set_bit(&bm) == -ENOSPC);
 
 	lfbm_destroy(&bm);
 	free(owner);
@@ -240,11 +245,11 @@ int main(int argc, char **argv)
 	unsigned int i;
 
 	test_init();
-	test_claim();
+	test_test_and_set();
 
 	for (i = 0; i < ARRAY_SIZE(sizes); i++)
 		test_order(sizes[i]);
-	printf("order, claim, init: ok\n");
+	printf("order, test_and_set, init: ok\n");
 
 	/* Plenty of room: not a single -ENOSPC is allowed. */
 	nospc = test_stress(4096 + 37, 8, 16, 300000 * scale);
